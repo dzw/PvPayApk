@@ -13,7 +13,6 @@ import android.os.PowerManager;
 import android.service.notification.NotificationListenerService;
 import android.service.notification.StatusBarNotification;
 import android.support.v4.app.NotificationCompat;
-import android.text.TextUtils;
 import android.util.Log;
 import android.widget.Toast;
 
@@ -23,11 +22,8 @@ import org.json.JSONException;
 import org.json.JSONObject;
 
 import java.io.IOException;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
 import java.util.Calendar;
-import java.util.Date;
 import java.util.List;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -38,10 +34,11 @@ import okhttp3.Request;
 import okhttp3.Response;
 
 public class NeNotificationService2 extends NotificationListenerService {
-    private static String TAG = "NeNotificationService2";
+    private static final String TAG = "NeNotificationService2";
     private final Handler handler = new Handler(Looper.getMainLooper());
     private String host = "";
     private String key = "";
+    private String appId = "";
     private Thread newThread = null;
     private PowerManager.WakeLock mWakeLock = null;
     public static boolean isRunning;
@@ -90,19 +87,20 @@ public class NeNotificationService2 extends NotificationListenerService {
                     SharedPreferences read = getSharedPreferences("vone", MODE_PRIVATE);
                     host = read.getString("host", "");
                     key = read.getString("key", "");
+                    appId = read.getString("app_id", "");
 
                     //这里写入子线程需要做的工作
-                    String t = String.valueOf(new Date().getTime());
-                    String sign = md5(t + key);
+                    String t = MonitorSign.timestamp();
+                    String sign = MonitorSign.heartbeat(t, key);
 
-                    final String url = "http://" + host + "/appHeart?t=" + t + "&sign=" + sign;
+                    final String url = host + "/appHeart?t=" + t + "&sign=" + sign +
+                                       (appId != null && !appId.isEmpty() ? "&app_id=" + appId : "");
                     Request request = new Request.Builder().url(url).method("GET", null).build();
                     Call call = Utils.getOkHttpClient().newCall(request);
                     call.enqueue(new Callback() {
                         @Override
                         public void onFailure(Call call, IOException e) {
-                            // final String error = e.getMessage();
-                            // Toast.makeText(getApplicationContext(), "心跳状态错误，请检查配置是否正确!" + error, Toast.LENGTH_LONG).show();
+                            Log.e(TAG, "Request failed", e);
                             foregroundHeart(url);
                         }
 
@@ -112,7 +110,7 @@ public class NeNotificationService2 extends NotificationListenerService {
                             try {
                                 Log.d(TAG, "onResponse heard: " + response.body().string());
                             } catch (Exception e) {
-                                e.printStackTrace();
+                                Log.e(TAG, "Error processing response", e);
                             }
                             if (!response.isSuccessful()) {
                                 foregroundHeart(url);
@@ -122,7 +120,7 @@ public class NeNotificationService2 extends NotificationListenerService {
                     try {
                         Thread.sleep(30 * 1000);
                     } catch (InterruptedException e) {
-                        e.printStackTrace();
+                        Log.e(TAG, "Interrupted", e);
                     }
                 }
             }
@@ -144,6 +142,7 @@ public class NeNotificationService2 extends NotificationListenerService {
         SharedPreferences read = getSharedPreferences("vone", MODE_PRIVATE);
         host = read.getString("host", "");
         key = read.getString("key", "");
+        appId = read.getString("app_id", "");
 
         Notification notification = sbn.getNotification();
         String pkg = sbn.getPackageName();
@@ -186,10 +185,14 @@ public class NeNotificationService2 extends NotificationListenerService {
                             }
                             if (money != null) {
                                 Log.d(TAG, "onAccessibilityEvent: 匹配成功： 支付宝 到账 " + money);
-                                try{
-                                    appPush(2, Double.parseDouble(money));
-                                } catch (Exception e) {
-                                    Log.d(TAG, "app push 错误！！！");
+                                if (PaymentFilter.accept(title + content, money)) {
+                                    try {
+                                        appPush(2, Double.parseDouble(money));
+                                    } catch (Exception e) {
+                                        Log.d(TAG, "app push 错误！！！");
+                                    }
+                                } else {
+                                    Log.d(TAG, "疑似非收款通知(退款/提现/越界金额)，忽略");
                                 }
                             } else {
                                 handler.post(new Runnable() {
@@ -219,10 +222,14 @@ public class NeNotificationService2 extends NotificationListenerService {
                             }
                             if (money != null) {
                                 Log.d(TAG, "onAccessibilityEvent: 匹配成功： 微信到账 " + money);
-                                try {
-                                    appPush(1, Double.parseDouble(money));
-                                } catch (Exception e) {
-                                    Log.d(TAG, "app push 错误！！！");
+                                if (PaymentFilter.accept(title + content, money)) {
+                                    try {
+                                        appPush(1, Double.parseDouble(money));
+                                    } catch (Exception e) {
+                                        Log.d(TAG, "app push 错误！！！");
+                                    }
+                                } else {
+                                    Log.d(TAG, "疑似非收款通知(退款/提现/越界金额)，忽略");
                                 }
                             } else {
                                 handler.post(new Runnable() {
@@ -238,6 +245,7 @@ public class NeNotificationService2 extends NotificationListenerService {
                     if (content.equals("这是一条测试推送信息，如果程序正常，则会提示监听权限正常")) {
                         handler.post(new Runnable() {
                             public void run() {
+                                MainActivity.onTestPushReceived();
                                 Toast.makeText(getApplicationContext(), "监听正常，如无法正常回调请联系作者反馈！", Toast.LENGTH_SHORT).show();
                             }
                         });
@@ -312,12 +320,18 @@ public class NeNotificationService2 extends NotificationListenerService {
         SharedPreferences read = getSharedPreferences("vone", MODE_PRIVATE);
         host = read.getString("host", "");
         key = read.getString("key", "");
+        appId = read.getString("app_id", "");
 
         Log.d(TAG, "onResponse  push: 开始:" + type + "  " + price);
 
-        String t = String.valueOf(new Date().getTime());
-        String sign = md5(type + "" + price + t + key);
-        final String url = "http://" + host + "/appPush?t=" + t + "&type=" + type + "&price=" + price + "&sign=" + sign;
+        String t = MonitorSign.timestamp();
+        final String typeText = String.valueOf(type);
+        // 金额文本必须与参与签名的文本完全一致,否则服务端按查询参数重算出的签名不会相等
+        final String priceText = MonitorSign.priceText(price);
+        String sign = MonitorSign.push(typeText, priceText, t, key);
+        final String url = host + "/appPush?t=" + t + "&type=" + typeText + "&price=" + priceText +
+                           "&sign=" + sign +
+                           (appId != null && !appId.isEmpty() ? "&app_id=" + appId : "");
         Log.d(TAG, "onResponse  push: 开始:" + url);
         Request request = new Request.Builder().url(url).method("GET", null).build();
         Call call = Utils.getOkHttpClient().newCall(request);
@@ -325,20 +339,23 @@ public class NeNotificationService2 extends NotificationListenerService {
             @Override
             public void onFailure(Call call, IOException e) {
                 Log.d(TAG, "onResponse  push: 请求失败");
-                foregroundPost(url + "&force_push=true");
+                foregroundPost(typeText, priceText);
                 releaseWakeLock();
             }
 
             @Override
             public void onResponse(Call call, Response response) throws IOException {
+                String body = "";
                 try {
-                    Log.d(TAG, "onResponse  push: " + response.body().string());
+                    body = response.body().string();
+                    Log.d(TAG, "onResponse  push: " + body);
                 } catch (Exception e) {
                     e.printStackTrace();
                 }
-                // 如果返回状态不是成功的。同样要回调
-                if (!response.isSuccessful()) {
-                    foregroundPost(url + "&force_push=true");
+                // 服务端签名校验失败返回 HTTP 200 + "sign error"，必须检查响应体，
+                // 否则会被当作推送成功而丢失这笔收款通知
+                if (!response.isSuccessful() || body.trim().contains("sign error")) {
+                    foregroundPost(typeText, priceText);
                 }
                 releaseWakeLock();
             }
@@ -367,14 +384,18 @@ public class NeNotificationService2 extends NotificationListenerService {
     }
 
     /**
-     * 当通知失败的时候，前台强制通知
+     * 当通知失败的时候，前台强制通知。
+     * 只传 type/price 参数而不传整条 URL——v2 签名带时间戳窗口，
+     * 重试必须由 ForegroundServer 每次用当前时间戳重新签名。
      */
-    private void foregroundPost(String url) {
+    private void foregroundPost(String typeText, String priceText) {
         final Context context = NeNotificationService2.this;
         if (isRunning) {
             final JSONObject extraJson = new JSONObject();
             try {
-                extraJson.put("url", url);
+                extraJson.put("type", typeText);
+                extraJson.put("price", priceText);
+                extraJson.put("show", true);
                 extraJson.put("try_count", 5);
             } catch (JSONException jsonException) {
                 jsonException.printStackTrace();
@@ -444,29 +465,6 @@ public class NeNotificationService2 extends NotificationListenerService {
         } else {
             return ss.get(ss.size() - 1);
         }
-    }
-
-    public static String md5(String string) {
-        if (TextUtils.isEmpty(string)) {
-            return "";
-        }
-        MessageDigest md5 = null;
-        try {
-            md5 = MessageDigest.getInstance("MD5");
-            byte[] bytes = md5.digest(string.getBytes());
-            StringBuilder result = new StringBuilder();
-            for (byte b : bytes) {
-                String temp = Integer.toHexString(b & 0xff);
-                if (temp.length() == 1) {
-                    temp = "0" + temp;
-                }
-                result.append(temp);
-            }
-            return result.toString();
-        } catch (NoSuchAlgorithmException e) {
-            e.printStackTrace();
-        }
-        return "";
     }
 
 }

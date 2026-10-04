@@ -33,26 +33,43 @@ import com.vone.qrcode.R;
 import com.vone.vmq.util.Constant;
 
 import java.io.IOException;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
-import java.util.Date;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 import okhttp3.Call;
 import okhttp3.Callback;
 import okhttp3.Request;
 import okhttp3.Response;
 
+
 public class MainActivity extends AppCompatActivity {
 
+    // VMQ APK 版本号
+    private final static String VMQ_VERSION = "2.0.0";
     private final Handler handler = new Handler(Looper.getMainLooper());
     private TextView txthost;
     private TextView txtkey;
+    private TextView txtAppId;
 
     private boolean isOk = false;
-    private static String TAG = "MainActivity";
+    private static final String TAG = "MainActivity";
+
+    //检测监听的回调超时
+    private static final long TEST_PUSH_TIMEOUT_MS = 4000;
+    private static volatile boolean testPushPending = false;
+    private final Runnable testPushTimeout = new Runnable() {
+        @Override
+        public void run() {
+            if (testPushPending) {
+                testPushPending = false;
+                Toast.makeText(MainActivity.this, "4 秒内没收到监听回调：通知使用权可能已失效，或本应用通知被系统折叠/拦截", Toast.LENGTH_LONG).show();
+            }
+        }
+    };
 
     private static String host;
     private static String key;
+    private static String appId;
     int id = 0;
 
     @Override
@@ -62,12 +79,15 @@ public class MainActivity extends AppCompatActivity {
 
         txthost = (TextView) findViewById(R.id.txt_host);
         txtkey = (TextView) findViewById(R.id.txt_key);
+        txtAppId = (TextView) findViewById(R.id.txt_app_id);
 
         //检测通知使用权是否启用
         if (!isNotificationListenersEnabled()) {
+            Toast.makeText(MainActivity.this, "未开启通知使用权，正在跳转授权页", Toast.LENGTH_LONG).show();
             //跳转到通知使用权页面
             gotoNotificationAccessSetting();
         } else if (!Utils.checkBatteryWhiteList(this)) {
+            Toast.makeText(MainActivity.this, "未加入电池优化白名单，正在跳转设置", Toast.LENGTH_LONG).show();
             Utils.gotoBatterySetting(this);
         }
         //重启监听服务
@@ -78,13 +98,15 @@ public class MainActivity extends AppCompatActivity {
         SharedPreferences read = getSharedPreferences("vone", MODE_PRIVATE);
         host = read.getString("host", "");
         key = read.getString("key", "");
+        appId = read.getString("app_id", "");
 
-        if (host != null && key != null && host != "" && key != "") {
+        if (host != null && key != null && !host.isEmpty() && !key.isEmpty()) {
             txthost.setText(" 通知地址：" + host);
             txtkey.setText(" 通讯密钥：" + key);
+            txtAppId.setText(" 应用ID：" + appId);
             isOk = true;
         }
-        Toast.makeText(MainActivity.this, "v免签开源免费免签系统 v1.8.1", Toast.LENGTH_SHORT).show();
+        Toast.makeText(MainActivity.this, "V免签开源免费免签系统 v" + VMQ_VERSION, Toast.LENGTH_SHORT).show();
     }
 
     //扫码配置
@@ -116,22 +138,31 @@ public class MainActivity extends AppCompatActivity {
 
             public void onClick(DialogInterface dialog, int which) {
                 String scanResult = inputServer.getText().toString();
+                // 使用正则表达式提取URL、sign和app_id
+                // 兼容旧 QR(http://host/key)和 daojiAnime 新 QR(http://host/key/appId)
+                Pattern pattern = Pattern.compile("^(https?://[^/]+)/([^/]+)(?:/([^/]+))?$");
+                Matcher matcher = pattern.matcher(scanResult);
 
-                String[] tmp = scanResult.split("/");
-                if (tmp.length != 2) {
+                if (!matcher.matches()) {
                     Toast.makeText(MainActivity.this, "数据错误，请您输入网站上显示的配置数据!", Toast.LENGTH_SHORT).show();
                     return;
                 }
 
-                String t = String.valueOf(new Date().getTime());
-                String sign = md5(t + tmp[1]);
+                String url = matcher.group(1);
+                String signKey = matcher.group(2);
+                String aid = matcher.group(3);  // 可能为 null (旧 QR 没 app_id)
 
-                Request request = new Request.Builder().url("http://" + tmp[0] + "/appHeart?t=" + t + "&sign=" + sign).method("GET", null).build();
+                String t = MonitorSign.timestamp();
+                String sign = MonitorSign.heartbeat(t, signKey);
+
+                String heartUrl = url + "/appHeart?t=" + t + "&sign=" + sign +
+                                  (aid != null ? "&app_id=" + aid : "");
+                Request request = new Request.Builder().url(heartUrl).method("GET", null).build();
                 Call call = Utils.getOkHttpClient().newCall(request);
                 call.enqueue(new Callback() {
                     @Override
                     public void onFailure(Call call, IOException e) {
-
+                        Log.e(TAG, "Request failed", e);
                     }
 
                     @Override
@@ -139,26 +170,29 @@ public class MainActivity extends AppCompatActivity {
                         try {
                             Log.d(TAG, "onResponse: " + response.body().string());
                         } catch (Exception e) {
-                            e.printStackTrace();
+                            Log.e(TAG, "Error processing response", e);
                         }
                         isOk = true;
                     }
                 });
-                if (tmp[0].indexOf("localhost") >= 0) {
+                if (url.contains("localhost")) {
                     Toast.makeText(MainActivity.this, "配置信息错误，本机调试请访问 本机局域网IP:8080(如192.168.1.101:8080) 获取配置信息进行配置!", Toast.LENGTH_LONG).show();
 
                     return;
                 }
                 //将扫描出的信息显示出来
-                txthost.setText(" 通知地址：" + tmp[0]);
-                txtkey.setText(" 通讯密钥：" + tmp[1]);
-                host = tmp[0];
-                key = tmp[1];
+                txthost.setText(" 通知地址：" + url);
+                txtkey.setText(" 通讯密钥：" + signKey);
+                txtAppId.setText(" 应用ID：" + (aid != null ? aid : "(无)"));
+                host = url;
+                key = signKey;
+                appId = aid != null ? aid : "";
 
                 SharedPreferences.Editor editor = getSharedPreferences("vone", MODE_PRIVATE).edit();
                 editor.putString("host", host);
                 editor.putString("key", key);
-                editor.commit();
+                editor.putString("app_id", appId);
+                editor.apply();
 
             }
         });
@@ -173,10 +207,12 @@ public class MainActivity extends AppCompatActivity {
             return;
         }
 
-        String t = String.valueOf(new Date().getTime());
-        String sign = md5(t + key);
+        String t = MonitorSign.timestamp();
+        String sign = MonitorSign.heartbeat(t, key);
 
-        Request request = new Request.Builder().url("http://" + host + "/appHeart?t=" + t + "&sign=" + sign).method("GET", null).build();
+        String heartUrl = host + "/appHeart?t=" + t + "&sign=" + sign +
+                          (appId != null && !appId.isEmpty() ? "&app_id=" + appId : "");
+        Request request = new Request.Builder().url(heartUrl).method("GET", null).build();
         Call call = Utils.getOkHttpClient().newCall(request);
         call.enqueue(new Callback() {
             @Override
@@ -190,15 +226,28 @@ public class MainActivity extends AppCompatActivity {
             }
 
             @Override
-            public void onResponse(Call call, final Response response) throws IOException {
+            public void onResponse(Call call, Response response) throws IOException {
+                // 必须在 worker 线程先读取 body（response.body().string() 会触发网络 I/O，
+                // 若放到 handler.post 的 Runnable 里就是主线程读网络，会抛 NetworkOnMainThreadException）
+                final boolean successful = response.isSuccessful();
+                final int code = response.code();
+                final String body;
+                try {
+                    body = response.body() != null ? response.body().string() : "";
+                } catch (Exception e) {
+                    e.printStackTrace();
+                    return;
+                } finally {
+                    response.close();
+                }
                 handler.post(new Runnable() {
                     @Override
                     public void run() {
-                        try {
-                            // 为什么每一个response都 try catch了，因为response.body有可能为空
-                            Toast.makeText(MainActivity.this, "心跳返回：" + response.body().string(), Toast.LENGTH_LONG).show();
-                        } catch (Exception e) {
-                            e.printStackTrace();
+                        if (successful) {
+                            Toast.makeText(MainActivity.this, "心跳正常：" + body, Toast.LENGTH_LONG).show();
+                        } else {
+                            Toast.makeText(MainActivity.this,
+                                    "心跳失败(" + code + ")：" + body, Toast.LENGTH_LONG).show();
                         }
                     }
                 });
@@ -208,6 +257,17 @@ public class MainActivity extends AppCompatActivity {
 
     //检测监听
     public void checkPush(View v) {
+        if (!isNotificationListenersEnabled()) {
+            Toast.makeText(MainActivity.this, "通知使用权未开启，正在跳转授权页，开启后再回来点一次检测！", Toast.LENGTH_LONG).show();
+            gotoNotificationAccessSetting();
+            return;
+        }
+        if (!NeNotificationService2.isRunning) {
+            Toast.makeText(MainActivity.this, "监听服务未在运行，已尝试重启服务，请稍等几秒再点一次检测！", Toast.LENGTH_LONG).show();
+            toggleNotificationListenerService(this);
+            return;
+        }
+
         Notification mNotification;
         NotificationManager mNotificationManager;
         mNotificationManager = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
@@ -239,6 +299,21 @@ public class MainActivity extends AppCompatActivity {
         //Toast.makeText(MainActivity.this, "已推送信息，如果权限，那么将会有下一条提示！", Toast.LENGTH_SHORT).show();
 
         mNotificationManager.notify(id++, mNotification);
+        // 回调由监听服务发出，服务被杀/权限失效时会无声无息，所以挂个超时兜底
+        testPushPending = true;
+        handler.removeCallbacks(testPushTimeout);
+        handler.postDelayed(testPushTimeout, TEST_PUSH_TIMEOUT_MS);
+    }
+
+    //收到测试推送回调时由监听服务调用
+    public static void onTestPushReceived() {
+        testPushPending = false;
+    }
+
+    @Override
+    protected void onDestroy() {
+        handler.removeCallbacks(testPushTimeout);
+        super.onDestroy();
     }
 
     //各种权限的判断
@@ -295,29 +370,6 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-    public static String md5(String string) {
-        if (TextUtils.isEmpty(string)) {
-            return "";
-        }
-        MessageDigest md5 = null;
-        try {
-            md5 = MessageDigest.getInstance("MD5");
-            byte[] bytes = md5.digest(string.getBytes());
-            StringBuilder result = new StringBuilder();
-            for (byte b : bytes) {
-                String temp = Integer.toHexString(b & 0xff);
-                if (temp.length() == 1) {
-                    temp = "0" + temp;
-                }
-                result.append(temp);
-            }
-            return result.toString();
-        } catch (NoSuchAlgorithmException e) {
-            e.printStackTrace();
-        }
-        return "";
-    }
-
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
@@ -326,21 +378,27 @@ public class MainActivity extends AppCompatActivity {
             Bundle bundle = data.getExtras();
             String scanResult = bundle.getString(Constant.INTENT_EXTRA_KEY_QR_SCAN);
 
-            String[] tmp = scanResult.split("/");
-            if (tmp.length != 2) {
+            Pattern pattern = Pattern.compile("^(https?://[^/]+)/([^/]+)(?:/([^/]+))?$");
+            Matcher matcher = pattern.matcher(scanResult);
+            if (!matcher.matches()) {
                 Toast.makeText(MainActivity.this, "二维码错误，请您扫描网站上显示的二维码!", Toast.LENGTH_SHORT).show();
                 return;
             }
+            String url = matcher.group(1);
+            String signKey = matcher.group(2);
+            String aid = matcher.group(3);
 
-            String t = String.valueOf(new Date().getTime());
-            String sign = md5(t + tmp[1]);
+            String t = MonitorSign.timestamp();
+            String sign = MonitorSign.heartbeat(t, signKey);
 
-            Request request = new Request.Builder().url("http://" + tmp[0] + "/appHeart?t=" + t + "&sign=" + sign).method("GET", null).build();
+            String heartUrl = url + "/appHeart?t=" + t + "&sign=" + sign +
+                              (aid != null ? "&app_id=" + aid : "");
+            Request request = new Request.Builder().url(heartUrl).method("GET", null).build();
             Call call = Utils.getOkHttpClient().newCall(request);
             call.enqueue(new Callback() {
                 @Override
                 public void onFailure(Call call, IOException e) {
-
+                    Log.e(TAG, "Request failed", e);
                 }
 
                 @Override
@@ -348,22 +406,25 @@ public class MainActivity extends AppCompatActivity {
                     try {
                         Log.d(TAG, "onResponse: " + response.body().string());
                     } catch (Exception e) {
-                        e.printStackTrace();
+                        Log.e(TAG, "Error processing response", e);
                     }
                     isOk = true;
                 }
             });
 
             //将扫描出的信息显示出来
-            txthost.setText(" 通知地址：" + tmp[0]);
-            txtkey.setText(" 通讯密钥：" + tmp[1]);
-            host = tmp[0];
-            key = tmp[1];
+            txthost.setText(" 通知地址：" + url);
+            txtkey.setText(" 通讯密钥：" + signKey);
+            txtAppId.setText(" 应用ID：" + (aid != null ? aid : "(无)"));
+            host = url;
+            key = signKey;
+            appId = aid != null ? aid : "";
 
             SharedPreferences.Editor editor = getSharedPreferences("vone", MODE_PRIVATE).edit();
             editor.putString("host", host);
             editor.putString("key", key);
-            editor.commit();
+            editor.putString("app_id", appId);
+            editor.apply();
         }
     }
 

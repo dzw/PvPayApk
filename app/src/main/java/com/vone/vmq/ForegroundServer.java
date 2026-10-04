@@ -9,6 +9,7 @@ import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
+import android.content.SharedPreferences;
 import android.os.Build;
 import android.os.Handler;
 import android.os.IBinder;
@@ -91,17 +92,84 @@ public class ForegroundServer extends Service {
         }
         try {
             JSONObject jsonObject = new JSONObject(extraStr);
-            final String url = jsonObject.optString("url");
-            if (url == null) {
+            boolean show = jsonObject.optBoolean("show", true);
+            if (jsonObject.has("type") && jsonObject.has("price")) {
+                if (show) {
+                    startLockActivity(this.getString(R.string.app_is_post));
+                }
+                tryPushResign(jsonObject.optString("type"), jsonObject.optString("price"),
+                        jsonObject.optInt("try_count", 1));
                 return;
             }
-            if (jsonObject.optBoolean("show", true)) {
+            final String url = jsonObject.optString("url");
+            if (url == null || url.isEmpty()) {
+                return;
+            }
+            if (show) {
                 startLockActivity(this.getString(R.string.app_is_post));
             }
             tryPushByUrl(url, jsonObject.optInt("try_count", 1));
         } catch (Exception e) {
             e.printStackTrace();
         }
+    }
+
+    /**
+     * v2 签名带毫秒时间戳新鲜度窗口，重试不能复用旧 URL，
+     * 每次尝试都读最新配置并用当前时间戳重新签名。
+     */
+    private void tryPushResign(final String typeText, final String priceText, final int count) {
+        if (count <= 0) {
+            handler.post(new Runnable() {
+                @Override
+                public void run() {
+                    NeNotificationService2.exitForeground(App.getContext());
+                }
+            });
+            return;
+        }
+        // 进行一个短暂的延迟再通知过去
+        handler.postDelayed(new Runnable() {
+            @Override
+            public void run() {
+                SharedPreferences read = getSharedPreferences("vone", MODE_PRIVATE);
+                String url = MonitorSign.pushUrl(read.getString("host", ""),
+                        read.getString("key", ""), read.getString("app_id", ""),
+                        typeText, priceText, true);
+                Request request = new Request.Builder().url(url).method("GET", null).build();
+                Call call = Utils.getOkHttpClient().newCall(request);
+                call.enqueue(new Callback() {
+                    @Override
+                    public void onFailure(Call call, IOException e) {
+                        Log.d("ForegroundServer", "onResponse  push: 请求失败");
+                        tryPushResign(typeText, priceText, count - 1);
+                    }
+
+                    @Override
+                    public void onResponse(Call call, Response response) throws IOException {
+                        String body = "";
+                        try {
+                            body = response.body().string();
+                            Log.d("ForegroundServer", "onResponse  push: " + body);
+                        } catch (Exception e) {
+                            e.printStackTrace();
+                        } finally {
+                            // 签名失败服务端返回 HTTP 200 + "sign error"，必须查响应体
+                            if (!response.isSuccessful() || body.trim().contains("sign error")) {
+                                tryPushResign(typeText, priceText, count - 1);
+                            } else {
+                                handler.post(new Runnable() {
+                                    @Override
+                                    public void run() {
+                                        NeNotificationService2.exitForeground(App.getContext());
+                                    }
+                                });
+                            }
+                        }
+                    }
+                });
+            }
+        }, MIN_SHOW_TIME);
     }
 
     private void tryPushByUrl(final String url, final int count) {

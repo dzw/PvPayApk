@@ -18,6 +18,8 @@
     <application
         android:name="com.vone.vmq.App"
         android:allowBackup="true"
+        android:fullBackupContent="@xml/backup_rules"
+        android:dataExtractionRules="@xml/data_extraction_rules"
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
         android:roundIcon="@mipmap/ic_launcher_round"
@@ -26,6 +28,7 @@
         android:theme="@style/AppTheme">
         <activity
             android:name="com.vone.vmq.MainActivity"
+            android:exported="true"
             android:excludeFromRecents="true">
             <intent-filter>
                 <action android:name="android.intent.action.VIEW" />
@@ -36,21 +39,24 @@
         </activity>
         <activity
             android:name="com.google.zxing.activity.CaptureActivity"
+            android:exported="false"
             android:excludeFromRecents="true" />
 
         <service
             android:name="com.vone.vmq.NeNotificationService2"
             android:label="@string/app_name"
+            android:exported="true"
             android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
             <intent-filter>
                 <action android:name="android.service.notification.NotificationListenerService" />
             </intent-filter>
         </service>
 
-        <service android:name="com.vone.vmq.ForegroundServer" />
+        <service android:name="com.vone.vmq.ForegroundServer" android:exported="false" />
 
         <activity
             android:name="com.vone.vmq.LockShowActivity"
+            android:exported="false"
             android:excludeFromRecents="true"
             android:launchMode="singleInstance" />
 
